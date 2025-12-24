@@ -24,7 +24,7 @@ BUILDING_DIR = Path("building_data/LoD1/northamerica")
 US_CENSUS = Path("census_blocks/united_states/US_census_blocks_with_schools.gpkg")
 CANADA_CENSUS = Path("census_blocks/canada/Canada_census_blocks_with_schools.gpkg")
 
-OUTPUT_GPKG = Path("building_data/buildings_near_schools.gpkg")
+OUTPUT_GPKG = Path("buildings_near_schools.gpkg")
 OUTPUT_CRS = "EPSG:4326"
 N_THREADS = 4
 FILE_STABILITY_WAIT = 15 # 15 second wait time to check file stability
@@ -243,6 +243,9 @@ def process_tile(con, tile_path: Path, us_srid: int, canada_srid: int):
 def append_to_gpkg(gdf: gpd.GeoDataFrame, output_path: Path):
     """Append buildings to the master GPKG (with error handling)."""
     try:
+        # Ensure output directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
         if output_path.exists():
             # Read existing, concat, write back (safer but slower for large files)
             existing = gpd.read_file(output_path, layer="buildings")
@@ -259,7 +262,6 @@ def append_to_gpkg(gdf: gpd.GeoDataFrame, output_path: Path):
     except Exception as e:
         print(f"  ✗ Failed to write to GPKG: {e}")
         traceback.print_exc()
-
 
 def main():
     # Connect to DuckDB
