@@ -1,0 +1,9 @@
+FTP Server Structure
+============================================================
+
+Current directory: /FD_Server_5/m1782307
+
+-r-xr-xr-x   1 33       33         316056 Jul 28 13:18 checksums.sha512
+dr-xr-xr-x   2 33       33              0 Jul 28 12:42 Height
+-r-xr-xr-x   1 33       33          19213 Jul 28 13:17 LICENSE
+dr-xr-xr-x   2 33       33              0 Jul 28 12:42 LoD1
