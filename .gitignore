@@ -3,3 +3,4 @@
 /building_data/LoD1/northamerica/
 /schools/united_states/private/*.sas7bdat
 /schools/united_states/public/*.sas7bdat
+/census_blocks/united_states/US_census_blocks_with_schools.gpkg

@@ -24,11 +24,11 @@ BUILDING_DIR = Path("building_data/LoD1/northamerica")
 US_CENSUS = Path("census_blocks/united_states/US_census_blocks_with_schools.gpkg")
 CANADA_CENSUS = Path("census_blocks/canada/Canada_census_blocks_with_schools.gpkg")
 
-OUTPUT_GPKG = Path("buildings_near_schools.gpkg")
+OUTPUT_GPKG = Path("building_data/buildings_near_schools.gpkg")
 OUTPUT_CRS = "EPSG:4326"
 N_THREADS = 4
-FILE_STABILITY_WAIT = 5
-MIN_FILE_SIZE = 1000
+FILE_STABILITY_WAIT = 15 # 15 second wait time to check file stability
+MIN_FILE_SIZE = 1000 # Processes files at least 1 MB in size
 PROCESSING_LOG = Path("outputs/processing_log.txt")
 BATCH_SIZE = 10000  # Process buildings in chunks to manage memory
 # ----------------------------
@@ -70,6 +70,8 @@ def _is_file_processed(name):
 
 
 def _mark_processed(name):
+    # Ensure the outputs directory exists
+    PROCESSING_LOG.parent.mkdir(exist_ok=True, parents=True)
     with open(PROCESSING_LOG, "a") as f:
         f.write(name + "\n")
 
@@ -118,8 +120,19 @@ def process_tile(con, tile_path: Path, us_srid: int, canada_srid: int):
     tmp_buildings = "buildings_tmp"
 
     try:
+        # Get file size
+        file_size_bytes = tile_path.stat().st_size
+        file_size_mb = file_size_bytes / (1024 * 1024)  # Convert to MB
+        file_size_gb = file_size_bytes / (1024 * 1024 * 1024)  # Convert to GB
+
+        # Format size nicely
+        if file_size_gb >= 1:
+            size_str = f"{file_size_gb:.2f} GB"
+        else:
+            size_str = f"{file_size_mb:.2f} MB"
+
         print(f"\n{'=' * 60}")
-        print(f"Processing: {tile_path.name}")
+        print(f"Processing: {tile_path.name} ({size_str})")
         print(f"{'=' * 60}")
 
         # Load buildings
@@ -206,7 +219,6 @@ def process_tile(con, tile_path: Path, us_srid: int, canada_srid: int):
             return None
 
         # Combine US + Canada results if both exist
-        import pandas as pd
         combined = pd.concat(results, ignore_index=True)
 
         # Convert WKB to GeoDataFrame
@@ -233,11 +245,13 @@ def append_to_gpkg(gdf: gpd.GeoDataFrame, output_path: Path):
     try:
         if output_path.exists():
             # Read existing, concat, write back (safer but slower for large files)
-            # For streaming, this works better than mode='a'
             existing = gpd.read_file(output_path, layer="buildings")
             combined = pd.concat([existing, gdf], ignore_index=True)
-            combined.to_file(str(output_path) + ".tmp", driver="GPKG", layer="buildings")
-            os.replace(str(output_path) + ".tmp", output_path)
+
+            # Use proper .gpkg.tmp extension to avoid warning
+            tmp_path = output_path.parent / f"{output_path.stem}_tmp.gpkg"
+            combined.to_file(tmp_path, driver="GPKG", layer="buildings")
+            os.replace(tmp_path, output_path)
             print(f"  ✓ Appended {len(gdf):,} buildings (total: {len(combined):,})")
         else:
             gdf.to_file(output_path, driver="GPKG", layer="buildings")
@@ -245,6 +259,7 @@ def append_to_gpkg(gdf: gpd.GeoDataFrame, output_path: Path):
     except Exception as e:
         print(f"  ✗ Failed to write to GPKG: {e}")
         traceback.print_exc()
+
 
 def main():
     # Connect to DuckDB
@@ -291,8 +306,8 @@ def main():
         unprocessed = [f for f in files if not _is_file_processed(f.name)]
 
         if not unprocessed:
-            print(f"\nNo new files to process. Waiting 30 seconds...")
-            time.sleep(30)
+            print(f"\nNo new files to process. Waiting 15 seconds...")
+            time.sleep(15)
             continue
 
         print(f"\nFound {len(unprocessed)} unprocessed files")
@@ -307,14 +322,20 @@ def main():
             result = process_tile(con, tile_path, us_srid, canada_srid)
 
             if result is GEOM_ERROR:
-                print(f"  ✗ Geometry error - skipping (won't retry)")
+                print(f"  ✗ Geometry error - keeping file for inspection")
                 _mark_processed(tile_path.name)
                 error_count += 1
                 continue
 
             if result is None:
-                print(f"  → No matches - marking as processed")
+                print(f"  → No matches - marking as processed and deleting file")
                 _mark_processed(tile_path.name)
+                # Delete since no errors, just no matches
+                try:
+                    tile_path.unlink()
+                    print(f"  🗑️  Deleted {tile_path.name}")
+                except Exception as e:
+                    print(f"  ⚠️  Could not delete: {e}")
                 continue
 
             # Append to master GPKG
@@ -322,9 +343,16 @@ def main():
             _mark_processed(tile_path.name)
             processed_count += 1
 
+            # DELETE THE ORIGINAL FILE (successful processing, no errors)
+            try:
+                tile_path.unlink()
+                print(f"  🗑️  Deleted {tile_path.name}")
+            except Exception as e:
+                print(f"  ⚠️  Could not delete {tile_path.name}: {e}")
+
             print(f"\n📊 Progress: {processed_count} tiles processed, {error_count} errors")
 
-        time.sleep(120)  # Wait before checking for new files
+        time.sleep(60)  # Wait before checking for new files
 
     con.close()
 
