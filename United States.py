@@ -1,5 +1,5 @@
 """
-Temporality: 2023-2024
+Temporality: 2019 - 2020
 Source: https://nces.ed.gov/programs/edge/geographic/schoollocations
 
 CRS: EPSG:5070 (NAD83 / Conus Albers) - Equal-area projection in meters for US analysis
@@ -75,13 +75,58 @@ if len(school_gdfs) == 0:
     print("ERROR: No school shapefiles could be read!")
     exit(1)
 
-print(f"\n[Step 1.3] Concatenating school GeoDataFrames...")
+# After loading all GeoDataFrames, before concatenation
+print(f"\n[Step 1.3] Validating columns and data types before concatenation...")
+
+# Check column consistency
+all_columns = set()
+column_counts = {}
+
+for i, gdf in enumerate(school_gdfs):
+    cols = set(gdf.columns)
+    all_columns.update(cols)
+
+    # Count how many files have each column
+    for col in cols:
+        column_counts[col] = column_counts.get(col, 0) + 1
+
+    print(f"  File {i + 1}: {len(gdf.columns)} columns, {len(gdf)} rows")
+
+# Report columns that aren't in all files
+print(f"\nTotal unique columns across all files: {len(all_columns)}")
+missing_cols = {col: len(school_gdfs) - count
+                for col, count in column_counts.items()
+                if count < len(school_gdfs)}
+
+if missing_cols:
+    print(f"\nWARNING: {len(missing_cols)} columns missing from some files:")
+    for col, missing_count in sorted(missing_cols.items(), key=lambda x: x[1], reverse=True):
+        print(f"  '{col}': missing from {missing_count}/{len(school_gdfs)} files")
+
+# Check data types for common columns
+print("\n[Step 1.4] Checking data types for common columns...")
+common_cols = [col for col, count in column_counts.items()
+               if count == len(school_gdfs)]
+
+for col in common_cols:
+    dtypes = set(str(gdf[col].dtype) for gdf in school_gdfs if col in gdf.columns)
+    if len(dtypes) > 1:
+        print(f"  WARNING: Column '{col}' has inconsistent types: {dtypes}")
+
+print(f"\n[Step 1.5] Concatenating {len(school_gdfs)} GeoDataFrames...")
 schools_gdf = pd.concat(school_gdfs, ignore_index=True)
 
 print(f"Total schools: {len(schools_gdf)}")
 print(f"School CRS: {schools_gdf.crs}")
 print(f"School EPSG: {TARGET_EPSG}")
 print(f"Units: meters")
+
+# Save concatenated schools to GeoPackage
+print("\n[Step 1.6] Saving concatenated schools to GeoPackage...")
+schools_output = schools_base / 'US_schools.gpkg'
+schools_gdf.to_file(schools_output, driver='GPKG', layer='schools')
+print(f"Saved {len(schools_gdf)} schools to: {schools_output}")
+print(f"File size: {schools_output.stat().st_size / (1024 ** 2):.2f} MB")
 
 # ============================================================================
 # PART 2: Load census block data

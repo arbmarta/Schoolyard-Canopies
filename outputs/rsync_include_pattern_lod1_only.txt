@@ -1,6 +1,6 @@
 # rsync include pattern for GlobalBuildingAtlas
 # LoD1 building models ONLY
-# Total tiles: 148
+# Total tiles: 147
 
 # Include directory structure
 + LoD1/
@@ -12,7 +12,6 @@
 + LoD1/northamerica/w145_n15_w140_n10.geojson
 + LoD1/northamerica/w065_n20_w060_n15.geojson
 + LoD1/northamerica/w070_n20_w065_n15.geojson
-+ LoD1/northamerica/w145_n20_w140_n15.geojson
 + LoD1/northamerica/w155_n20_w150_n15.geojson
 + LoD1/northamerica/w160_n20_w155_n15.geojson
 + LoD1/northamerica/w080_n25_w075_n20.geojson

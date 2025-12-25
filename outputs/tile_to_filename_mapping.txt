@@ -6,7 +6,6 @@ N10_W140        -> w140_n15_w135_n10.geojson
 N10_W145        -> w145_n15_w140_n10.geojson
 N15_W065        -> w065_n20_w060_n15.geojson
 N15_W070        -> w070_n20_w065_n15.geojson
-N15_W145        -> w145_n20_w140_n15.geojson
 N15_W155        -> w155_n20_w150_n15.geojson
 N15_W160        -> w160_n20_w155_n15.geojson
 N20_W080        -> w080_n25_w075_n20.geojson

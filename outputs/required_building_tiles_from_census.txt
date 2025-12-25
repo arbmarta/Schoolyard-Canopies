@@ -1,14 +1,13 @@
 Required GlobalBuildingAtlas Tiles
 ============================================================
 
-Total tiles: 148
+Total tiles: 147
 
 N-15_W170
 N10_W140
 N10_W145
 N15_W065
 N15_W070
-N15_W145
 N15_W155
 N15_W160
 N20_W080
