@@ -5,6 +5,7 @@ Complete workflow: Identify tiles from census blocks and create download pattern
 import geopandas as gpd
 from pathlib import Path
 import pandas as pd
+from ftplib import FTP
 
 print("=" * 60)
 print("GlobalBuildingAtlas Download Preparation")
@@ -17,8 +18,8 @@ print("=" * 60)
 print("\n[PART 1] Loading census blocks with schools...")
 
 # Census block paths
-us_census_path = Path('census_blocks/united_states/US_census_blocks_with_schools.gpkg')
-canada_census_path = Path('census_blocks/canada/Canada_census_blocks_with_schools.gpkg')
+us_census_path = Path('../census_blocks/united_states/US_census_blocks_with_schools.gpkg')
+canada_census_path = Path('../census_blocks/canada/Canada_census_blocks_with_schools.gpkg')
 
 census_blocks = []
 
@@ -107,7 +108,7 @@ print(f"\nTotal unique tiles needed: {len(required_tiles)}")
 sorted_tiles = sorted(list(required_tiles))
 
 # Save tile list
-tile_list_file = 'outputs/required_building_tiles_from_census.txt'
+tile_list_file = '../outputs/required_building_tiles_from_census.txt'
 with open(tile_list_file, 'w') as f:
     f.write("Required GlobalBuildingAtlas Tiles\n")
     f.write("=" * 60 + "\n\n")
@@ -166,7 +167,7 @@ print(f"... ({len(sorted_tiles) - 10} more tiles)")
 
 print("\n[PART 4] Creating rsync download pattern...")
 
-rsync_pattern_file = 'outputs/rsync_include_pattern_lod1_only.txt'
+rsync_pattern_file = '../outputs/rsync_include_pattern_lod1_only.txt'
 
 with open(rsync_pattern_file, 'w') as f:
     f.write("# rsync include pattern for GlobalBuildingAtlas\n")
@@ -189,7 +190,7 @@ with open(rsync_pattern_file, 'w') as f:
 print(f"rsync pattern saved to: {rsync_pattern_file}")
 
 # Save tile mapping reference
-mapping_file = 'outputs/tile_to_filename_mapping.txt'
+mapping_file = '../outputs/tile_to_filename_mapping.txt'
 with open(mapping_file, 'w') as f:
     f.write("Tile Name -> Server Filename Mapping\n")
     f.write("=" * 60 + "\n\n")
@@ -256,3 +257,50 @@ The download can be interrupted and resumed - just re-run the same command.
 """)
 
 print(f"{'=' * 60}")
+
+# ============================================================================
+# Explore FTP server structure before downloading
+# ============================================================================
+
+FTP_HOST = 'dataserv.ub.tum.de'
+FTP_USER = 'm1782307'
+FTP_PASS = 'm1782307'
+
+print("Exploring FTP Server Structure...\n")
+
+try:
+    ftp = FTP(FTP_HOST, timeout=30)
+    ftp.login(FTP_USER, FTP_PASS)
+
+    print("✓ Connected successfully!\n")
+
+    # Get current directory
+    print(f"Current directory: {ftp.pwd()}")
+
+    # List root directory
+    print("\n--- Root Directory Contents ---")
+    files = []
+    ftp.retrlines('LIST', files.append)
+
+    for item in files:
+        print(item)
+
+    # Save to file
+    with open('outputs/ftp_structure.txt', 'w') as f:
+        f.write("FTP Server Structure\n")
+        f.write("=" * 60 + "\n\n")
+        f.write(f"Current directory: {ftp.pwd()}\n\n")
+        for item in files:
+            f.write(f"{item}\n")
+
+    print("\n\nStructure saved to: ftp_structure.txt")
+    print("\nPlease check this file to understand how files are organized.")
+
+    ftp.quit()
+
+except Exception as e:
+    print(f"Error: {e}")
+    print("\nThis suggests:")
+    print("1. FTP might be blocked by firewall")
+    print("2. Credentials might be incorrect")
+    print("3. Server might not allow FTP connections")

@@ -21,15 +21,15 @@ import pandas as pd
 
 # ---------- CONFIG ----------
 BUILDING_DIR = Path("building_data/LoD1/northamerica")
-US_CENSUS = Path("census_blocks/united_states/US_census_blocks_with_schools.gpkg")
-CANADA_CENSUS = Path("census_blocks/canada/Canada_census_blocks_with_schools.gpkg")
+US_CENSUS = Path("../census_blocks/united_states/US_census_blocks_with_schools.gpkg")
+CANADA_CENSUS = Path("../census_blocks/canada/Canada_census_blocks_with_schools.gpkg")
 
-OUTPUT_GPKG = Path("buildings_near_schools.gpkg")
+OUTPUT_GPKG = Path("../buildings_near_schools.gpkg")
 OUTPUT_CRS = "EPSG:4326"
 N_THREADS = 4
 FILE_STABILITY_WAIT = 15 # 15 second wait time to check file stability
 MIN_FILE_SIZE = 1000 # Processes files at least 1 MB in size
-PROCESSING_LOG = Path("outputs/processing_log.txt")
+PROCESSING_LOG = Path("../outputs/TUM_geojson_processing_log.txt")
 BATCH_SIZE = 10000  # Process buildings in chunks to manage memory
 # ----------------------------
 
