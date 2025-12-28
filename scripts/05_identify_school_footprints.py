@@ -2,9 +2,14 @@ import geopandas as gpd
 from pathlib import Path
 import duckdb
 from shapely import wkb
+from shapely.geometry import Point
 import pandas as pd
 import fiona
 from pyproj import CRS
+from geopy.geocoders import Nominatim
+from geopy.exc import GeocoderTimedOut, GeocoderServiceError
+import time
+from typing import Optional, Tuple
 
 # ============================================================================
 # CONFIGURATION
@@ -18,7 +23,8 @@ COUNTRIES = {
         'buildings_layer': 'buildings',
         'output_path': '../outputs/canada_school_footprints.gpkg',
         'epsg': 3347,
-        'crs': 'EPSG:3347'
+        'crs': 'EPSG:3347',
+        'country_code': 'ca'
     },
     'united_states': {
         'schools_path': '../inputs/schools/united_states/US_school_points.gpkg',
@@ -27,11 +33,18 @@ COUNTRIES = {
         'buildings_layer': 'buildings',
         'output_path': '../outputs/us_school_footprints.gpkg',
         'epsg': 5070,
-        'crs': 'EPSG:5070'
+        'crs': 'EPSG:5070',
+        'country_code': 'us'
     }
 }
 
 N_THREADS = 4
+
+# OSM Geocoding settings
+OSM_USER_AGENT = "school_footprint_matcher/1.0"
+OSM_TIMEOUT = 10
+OSM_DELAY = 1.0  # Delay between requests (seconds) - be respectful to OSM servers
+MAX_GEOCODE_ATTEMPTS = 3
 
 
 # ============================================================================
@@ -63,16 +76,278 @@ def _get_srid_via_fiona(path, layer=None):
         return None
 
 
+def build_address_string(row, address_fields=None):
+    """
+    Build an address string from school data.
+
+    Common address field names to look for:
+    - address, street, street_address, addr_street
+    - city, municipality, town
+    - state, province, region
+    - zip, postal_code, postcode
+    - name, school_name
+    """
+    if address_fields is None:
+        # Try to detect common address fields
+        address_fields = {
+            'name': None,
+            'street': None,
+            'city': None,
+            'state': None,
+            'postal': None
+        }
+
+        columns = [c.lower() for c in row.index]
+
+        # Detect name field
+        for field in ['name', 'school_name', 'facility_name', 'schoolname']:
+            if field in columns:
+                address_fields['name'] = row.index[columns.index(field)]
+                break
+
+        # Detect street field
+        for field in ['address', 'street', 'street_address', 'addr_street', 'full_address']:
+            if field in columns:
+                address_fields['street'] = row.index[columns.index(field)]
+                break
+
+        # Detect city field
+        for field in ['city', 'municipality', 'town', 'locality']:
+            if field in columns:
+                address_fields['city'] = row.index[columns.index(field)]
+                break
+
+        # Detect state/province field
+        for field in ['state', 'province', 'region', 'state_province']:
+            if field in columns:
+                address_fields['state'] = row.index[columns.index(field)]
+                break
+
+        # Detect postal code field
+        for field in ['zip', 'zipcode', 'postal_code', 'postcode', 'postal']:
+            if field in columns:
+                address_fields['postal'] = row.index[columns.index(field)]
+                break
+
+    # Build address string
+    parts = []
+
+    if address_fields['name'] and pd.notna(row.get(address_fields['name'])):
+        parts.append(str(row[address_fields['name']]))
+
+    if address_fields['street'] and pd.notna(row.get(address_fields['street'])):
+        parts.append(str(row[address_fields['street']]))
+
+    if address_fields['city'] and pd.notna(row.get(address_fields['city'])):
+        parts.append(str(row[address_fields['city']]))
+
+    if address_fields['state'] and pd.notna(row.get(address_fields['state'])):
+        parts.append(str(row[address_fields['state']]))
+
+    if address_fields['postal'] and pd.notna(row.get(address_fields['postal'])):
+        parts.append(str(row[address_fields['postal']]))
+
+    return ', '.join(parts) if parts else None
+
+
+def geocode_with_osm(address: str, country_code: str, geolocator: Nominatim) -> Optional[Tuple[float, float]]:
+    """
+    Geocode an address using OSM Nominatim.
+
+    Returns:
+        Tuple of (latitude, longitude) or None if geocoding fails
+    """
+    if not address or pd.isna(address):
+        return None
+
+    for attempt in range(MAX_GEOCODE_ATTEMPTS):
+        try:
+            location = geolocator.geocode(
+                address,
+                country_codes=country_code,
+                timeout=OSM_TIMEOUT
+            )
+
+            if location:
+                return (location.latitude, location.longitude)
+            else:
+                return None
+
+        except GeocoderTimedOut:
+            if attempt < MAX_GEOCODE_ATTEMPTS - 1:
+                time.sleep(OSM_DELAY * 2)
+                continue
+            else:
+                return None
+        except GeocoderServiceError as e:
+            print(f"    Geocoding service error: {e}")
+            return None
+        except Exception as e:
+            print(f"    Unexpected geocoding error: {e}")
+            return None
+
+    return None
+
+
+def geocode_unmatched_schools(unmatched_schools: gpd.GeoDataFrame, country_code: str) -> gpd.GeoDataFrame:
+    """
+    Attempt to geocode unmatched schools using OSM Nominatim.
+
+    Returns:
+        GeoDataFrame with additional columns: osm_lat, osm_lon, osm_geocoded, osm_address_used
+    """
+    print("\n[OSM GEOCODING] Starting geocoding of unmatched schools...")
+    print(f"  Schools to geocode: {len(unmatched_schools):,}")
+    print(f"  Delay between requests: {OSM_DELAY}s")
+    print("  This may take a while - please be patient!")
+
+    geolocator = Nominatim(user_agent=OSM_USER_AGENT)
+
+    # Add new columns
+    unmatched_schools['osm_lat'] = None
+    unmatched_schools['osm_lon'] = None
+    unmatched_schools['osm_geocoded'] = False
+    unmatched_schools['osm_address_used'] = None
+
+    success_count = 0
+
+    for idx, row in unmatched_schools.iterrows():
+        if (idx + 1) % 10 == 0:
+            print(f"  Progress: {idx + 1}/{len(unmatched_schools)} ({success_count} successful)")
+
+        # Build address string
+        address = build_address_string(row)
+
+        if not address:
+            continue
+
+        unmatched_schools.at[idx, 'osm_address_used'] = address
+
+        # Geocode
+        coords = geocode_with_osm(address, country_code, geolocator)
+
+        if coords:
+            unmatched_schools.at[idx, 'osm_lat'] = coords[0]
+            unmatched_schools.at[idx, 'osm_lon'] = coords[1]
+            unmatched_schools.at[idx, 'osm_geocoded'] = True
+            success_count += 1
+
+        # Be respectful to OSM servers
+        time.sleep(OSM_DELAY)
+
+    print(f"\n  Geocoding complete!")
+    print(
+        f"  Successfully geocoded: {success_count}/{len(unmatched_schools)} ({success_count / len(unmatched_schools) * 100:.1f}%)")
+
+    return unmatched_schools
+
+
+def retry_matching_with_osm_coords(
+        geocoded_schools: gpd.GeoDataFrame,
+        con: duckdb.DuckDBPyConnection,
+        building_geom_col: str,
+        building_srid: int,
+        target_srid: int,
+        target_crs: str
+) -> Tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+    """
+    Retry matching schools using OSM-geocoded coordinates.
+
+    Returns:
+        Tuple of (newly_matched_schools, still_unmatched_schools)
+    """
+    print("\n[OSM RETRY] Retrying building matching with OSM coordinates...")
+
+    # Filter to only successfully geocoded schools
+    geocoded = geocoded_schools[geocoded_schools['osm_geocoded'] == True].copy()
+
+    if len(geocoded) == 0:
+        print("  No successfully geocoded schools to retry")
+        return gpd.GeoDataFrame(), geocoded_schools
+
+    print(f"  Retrying {len(geocoded):,} schools with OSM coordinates")
+
+    # Create new geometries from OSM coordinates (in WGS84/EPSG:4326)
+    geocoded['osm_geometry'] = geocoded.apply(
+        lambda row: Point(row['osm_lon'], row['osm_lat']),
+        axis=1
+    )
+
+    # Create temporary GeoDataFrame with OSM geometries
+    osm_schools = gpd.GeoDataFrame(
+        geocoded,
+        geometry='osm_geometry',
+        crs='EPSG:4326'
+    )
+
+    # Load OSM schools into DuckDB
+    temp_gpkg = Path('/tmp/osm_schools_temp.gpkg')
+    osm_schools.to_file(temp_gpkg, driver='GPKG', layer='osm_schools')
+
+    con.execute(f"CREATE OR REPLACE TABLE osm_schools AS SELECT * FROM ST_Read('{temp_gpkg}', layer='osm_schools')")
+    osm_geom_col = _detect_geom_col(con, "osm_schools")
+
+    # Perform spatial intersection with buildings
+    sql = f"""
+    SELECT 
+        b.* EXCLUDE {building_geom_col},
+        s.* EXCLUDE {osm_geom_col},
+        ST_AsWKB(ST_Transform(b.{building_geom_col}, 'EPSG:{building_srid}', '{target_crs}')) AS geom_wkb
+    FROM buildings b
+    INNER JOIN osm_schools s
+    ON ST_Intersects(
+        ST_Transform(b.{building_geom_col}, 'EPSG:{building_srid}', 'EPSG:{target_srid}'),
+        ST_Transform(s.{osm_geom_col}, 'EPSG:4326', 'EPSG:{target_srid}')
+    )
+    """
+
+    try:
+        result_df = con.execute(sql).df()
+
+        if len(result_df) > 0:
+            # Convert WKB to geometry
+            result_df['geometry'] = result_df['geom_wkb'].apply(lambda x: wkb.loads(bytes(x)))
+            result_df = result_df.drop('geom_wkb', axis=1)
+
+            newly_matched = gpd.GeoDataFrame(result_df, geometry='geometry', crs=target_crs)
+
+            # Remove duplicates
+            newly_matched = newly_matched.drop_duplicates(subset=['geometry'])
+
+            print(f"  Successfully matched {len(newly_matched):,} buildings using OSM coordinates!")
+
+            # Identify schools that are still unmatched
+            matched_indices = set(newly_matched.index)
+            still_unmatched = geocoded_schools[~geocoded_schools.index.isin(matched_indices)].copy()
+
+            return newly_matched, still_unmatched
+        else:
+            print("  No additional matches found with OSM coordinates")
+            return gpd.GeoDataFrame(), geocoded_schools
+
+    except Exception as e:
+        print(f"  ERROR during OSM retry matching: {e}")
+        import traceback
+        traceback.print_exc()
+        return gpd.GeoDataFrame(), geocoded_schools
+    finally:
+        # Clean up temp file
+        if temp_gpkg.exists():
+            temp_gpkg.unlink()
+
+
 # ============================================================================
 # MAIN PROCESSING FUNCTION
 # ============================================================================
 
-def process_country(country_name, config):
-    """Identify school footprints for a country using DuckDB."""
+def process_country(country_name, config, use_osm=True):
+    """Identify school footprints for a country using DuckDB, with optional OSM geocoding."""
 
     print("=" * 60)
     print(f"{country_name.upper()}: School Building Footprint Identification")
     print(f"Using {config['crs']} with DuckDB")
+    if use_osm:
+        print("OSM Geocoding: ENABLED")
     print("=" * 60)
 
     # ========================================================================
@@ -288,12 +563,55 @@ def process_country(country_name, config):
         print(f"Warning: Could not calculate unmatched schools: {e}")
         unmatched_schools = None
 
+    # ========================================================================
+    # PART 5: OSM Geocoding and Retry (if enabled)
+    # ========================================================================
+    osm_matched = None
+
+    if use_osm and unmatched_schools is not None and len(unmatched_schools) > 0:
+        print("\n" + "=" * 60)
+        print("PART 5: OSM GEOCODING ENHANCEMENT")
+        print("=" * 60)
+
+        # Geocode unmatched schools
+        geocoded_schools = geocode_unmatched_schools(
+            unmatched_schools.copy(),
+            config['country_code']
+        )
+
+        # Retry matching with OSM coordinates
+        osm_matched, still_unmatched = retry_matching_with_osm_coords(
+            geocoded_schools,
+            con,
+            building_geom_col,
+            building_srid,
+            target_srid,
+            target_crs
+        )
+
+        # Update statistics
+        if osm_matched is not None and len(osm_matched) > 0:
+            # Combine original matches with OSM matches
+            school_footprints = pd.concat([school_footprints, osm_matched], ignore_index=True)
+            school_footprints = school_footprints.drop_duplicates(subset=['geometry'])
+
+            # Update unmatched schools
+            unmatched_schools = still_unmatched
+
+            print(f"\n{'=' * 60}")
+            print("OSM GEOCODING RESULTS")
+            print(f"{'=' * 60}")
+            print(f"Additional schools matched via OSM: {len(osm_matched):,}")
+            print(f"Total schools now matched: {len(school_footprints):,}")
+            print(f"Schools still unmatched: {len(unmatched_schools):,}")
+            print(f"{'=' * 60}\n")
+
     con.close()
 
     # ========================================================================
-    # PART 5: Save outputs
+    # PART 6: Save outputs
     # ========================================================================
-    print("\n[PART 5] Saving outputs...")
+    print("\n[PART 6] Saving outputs...")
 
     output_path = Path(config['output_path'])
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -301,6 +619,12 @@ def process_country(country_name, config):
     # Save school footprints
     school_footprints.to_file(output_path, driver='GPKG', layer='school_buildings')
     print(f"Saved school footprints to: {output_path}")
+
+    # If there were OSM matches, save them separately too
+    if osm_matched is not None and len(osm_matched) > 0:
+        osm_output_path = output_path.parent / f"{country_name.lower().replace(' ', '_')}_osm_matched_footprints.gpkg"
+        osm_matched.to_file(osm_output_path, driver='GPKG', layer='osm_matched_buildings')
+        print(f"Saved OSM-matched footprints to: {osm_output_path}")
 
     # Save unmatched schools as CSV and GeoPackage
     if unmatched_schools is not None and len(unmatched_schools) > 0:
@@ -320,7 +644,10 @@ def process_country(country_name, config):
     print(f"SUCCESS!")
     print(f"{'=' * 60}")
     print(f"School footprints: {len(school_footprints):,}")
-    print(f"Unmatched schools: {unmatched_count:,}")
+    if osm_matched is not None and len(osm_matched) > 0:
+        print(f"  - Original matches: {len(school_footprints) - len(osm_matched):,}")
+        print(f"  - OSM enhanced matches: {len(osm_matched):,}")
+    print(f"Unmatched schools: {len(unmatched_schools) if unmatched_schools is not None else 0:,}")
     print(f"CRS: {target_crs}")
     print(f"File size: {output_path.stat().st_size / (1024 ** 2):.2f} MB")
     print(f"{'=' * 60}\n")
@@ -333,8 +660,8 @@ def process_country(country_name, config):
 # ============================================================================
 
 if __name__ == '__main__':
-    # Process Canada
-    process_country('canada', COUNTRIES['canada'])
+    # Process Canada with OSM enhancement
+    process_country('canada', COUNTRIES['canada'], use_osm=True)
 
-    # Process United States
-    process_country('united_states', COUNTRIES['united_states'])
+    # Process United States with OSM enhancement
+    process_country('united_states', COUNTRIES['united_states'], use_osm=True)
