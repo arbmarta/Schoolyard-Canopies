@@ -21,7 +21,7 @@ import pandas as pd
 
 # ---------- CONFIG ----------
 BUILDING_DIR = Path("building_data/LoD1/northamerica")
-US_CENSUS = Path("../inputs/census_blocks/united_states/US_census_blocks_with_schools.gpkg")
+US_CENSUS = Path("../inputs/census_blocks/united_states/us_census_blocks_with_schools.gpkg")
 CANADA_CENSUS = Path("../inputs/census_blocks/canada/Canada_census_blocks_with_schools.gpkg")
 
 OUTPUT_GPKG = Path("../outputs/buildings_near_schools.gpkg")

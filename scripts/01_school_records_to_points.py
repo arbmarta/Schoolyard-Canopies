@@ -45,9 +45,9 @@ COUNTRIES = {
         'crs': 'EPSG:5070',
         'name': 'NAD83 Conus Albers',
         'schools_base': '../inputs/schools/united_states',
-        'grades_public_csv': '../inputs/schools/united_states/school_grades_public.csv',
-        'grades_private_csv': '../inputs/schools/united_states/school_grades_private.csv',
-        'output_path': '../inputs/schools/united_states/US_school_points.gpkg'
+        'grades_public_csv': '../inputs/schools/united_states/public/school_grades_public.csv',
+        'grades_private_csv': '../inputs/schools/united_states/private/school_grades_private.csv',
+        'output_path': '../inputs/schools/united_states/us_school_points.gpkg'
     }
 }
 
@@ -368,13 +368,8 @@ def save_schools(schools_gdf, config):
     output_path = Path(config['output_path'])
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Determine layer name
-    layer = 'schools' if 'united_states' in str(output_path) else None
-
-    if layer:
-        schools_gdf.to_file(output_path, driver='GPKG', layer=layer)
-    else:
-        schools_gdf.to_file(output_path, driver='GPKG')
+    # Always use 'schools' layer name for consistency
+    schools_gdf.to_file(output_path, driver='GPKG', layer='schools')
 
     print(f"\n{'=' * 60}")
     print(f"SUCCESS!")
