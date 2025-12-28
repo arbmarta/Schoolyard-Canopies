@@ -1,7 +1,7 @@
-/census_blocks/canada/census_boundary_files/
-/census_blocks/united_states/state_level/
+/inputs/census_blocks/canada/census_boundary_files/
+/inputs/census_blocks/united_states/state_level/
 /building_data/LoD1/northamerica/
 /schools/united_states/private/*.sas7bdat
 /schools/united_states/public/*.sas7bdat
 /schools/united_states/public/*.dbf
-/census_blocks/united_states/US_census_blocks_with_schools.gpkg
+/inputs/census_blocks/united_states/US_census_blocks_with_schools.gpkg
