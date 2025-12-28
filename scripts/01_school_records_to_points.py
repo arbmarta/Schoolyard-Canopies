@@ -1,9 +1,12 @@
 """
+
 Convert school records to point geometries and save as GeoPackage.
 
 Sources:
 - Canada (2019-2021): https://www.statcan.gc.ca/en/lode/databases/odef
 - United States (2019-2020): https://nces.ed.gov/programs/edge/geographic/schoollocations
+- United States (2019-2020): https://nces.ed.gov/ccd/files.asp#Fiscal:2,LevelId:7,SchoolYearId:34,Page:1
+- United States (2019-2020): https://nces.ed.gov/surveys/pss/pssdata.asp
 
 CRS:
 - Canada: EPSG:3347 (Statistics Canada Lambert)
@@ -17,6 +20,7 @@ ISCED Classification:
 - ISCED2: Junior secondary (grades 7-9)
 - ISCED3: Senior secondary (grades 10-12)
 - ISCED4Plus: Post-secondary (excluded from analysis)
+
 """
 
 import pandas as pd
@@ -280,12 +284,12 @@ def process_united_states():
 
     # Load public school grades
     print("  Loading public school grades...")
-    grades_public = pd.read_csv(config['grades_public_csv'])
+    grades_public = pd.read_csv(config['grades_public_csv'], encoding='latin1', low_memory=False)
     print(f"  Loaded {len(grades_public)} public grade records")
 
     # Load private school grades
     print("  Loading private school grades...")
-    grades_private = pd.read_csv(config['grades_private_csv'])
+    grades_private = pd.read_csv(config['grades_private_csv'], encoding='latin1', low_memory=False)
     print(f"  Loaded {len(grades_private)} private grade records")
 
     # Merge public schools on NCESSCH
