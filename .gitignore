@@ -5,3 +5,5 @@
 /schools/united_states/public/*.sas7bdat
 /schools/united_states/public/*.dbf
 /inputs/census_blocks/united_states/US_census_blocks_with_schools.gpkg
+/outputs/buildings_near_schools.gpkg
+/inputs/schools/united_states/public/EDGE_GEOCODE_PUBLICSCH_1920.dbf
