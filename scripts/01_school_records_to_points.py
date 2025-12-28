@@ -9,6 +9,14 @@ CRS:
 - Canada: EPSG:3347 (Statistics Canada Lambert)
 - United States: EPSG:5070 (NAD83 / Conus Albers)
 Both are equal-area projections in meters
+
+ISCED Classification:
+- ISCED010: Pre-kindergarten (early childhood education)
+- ISCED020: Kindergarten
+- ISCED1: Elementary (grades 1-6)
+- ISCED2: Junior secondary (grades 7-9)
+- ISCED3: Senior secondary (grades 10-12)
+- ISCED4Plus: Post-secondary (excluded from analysis)
 """
 
 import pandas as pd
@@ -33,7 +41,8 @@ COUNTRIES = {
         'crs': 'EPSG:5070',
         'name': 'NAD83 Conus Albers',
         'schools_base': '../inputs/schools/united_states',
-        'grades_csv': '../inputs/schools/united_states/school_grades.csv',
+        'grades_public_csv': '../inputs/schools/united_states/school_grades_public.csv',
+        'grades_private_csv': '../inputs/schools/united_states/school_grades_private.csv',
         'output_path': '../inputs/schools/united_states/US_school_points.gpkg'
     }
 }
@@ -105,6 +114,103 @@ def process_canada():
 
 
 # ============================================================================
+# HELPER: Create ISCED columns from grade data
+# ============================================================================
+
+def create_isced_columns(df):
+    """
+    Create ISCED level indicator columns (0/1) based on grades offered.
+
+    ISCED Classification:
+    - ISCED010: Pre-kindergarten (PK)
+    - ISCED020: Kindergarten (KG)
+    - ISCED1: Elementary (grades 1-6)
+    - ISCED2: Junior secondary (grades 7-9)
+    - ISCED3: Senior secondary (grades 10-12)
+    """
+
+    # Initialize all ISCED columns to 0
+    df['ISCED010'] = 0
+    df['ISCED020'] = 0
+    df['ISCED1'] = 0
+    df['ISCED2'] = 0
+    df['ISCED3'] = 0
+
+    # For public schools: use G_*_OFFERED columns
+    if 'G_PK_OFFERED' in df.columns:
+        df.loc[df['G_PK_OFFERED'] == 'Yes', 'ISCED010'] = 1
+
+    if 'G_KG_OFFERED' in df.columns:
+        df.loc[df['G_KG_OFFERED'] == 'Yes', 'ISCED020'] = 1
+
+    # ISCED1: Grades 1-6
+    for grade in ['G_1_OFFERED', 'G_2_OFFERED', 'G_3_OFFERED',
+                  'G_4_OFFERED', 'G_5_OFFERED', 'G_6_OFFERED']:
+        if grade in df.columns:
+            df.loc[df[grade] == 'Yes', 'ISCED1'] = 1
+
+    # ISCED2: Grades 7-9
+    for grade in ['G_7_OFFERED', 'G_8_OFFERED', 'G_9_OFFERED']:
+        if grade in df.columns:
+            df.loc[df[grade] == 'Yes', 'ISCED2'] = 1
+
+    # ISCED3: Grades 10-12
+    for grade in ['G_10_OFFERED', 'G_11_OFFERED', 'G_12_OFFERED']:
+        if grade in df.columns:
+            df.loc[df[grade] == 'Yes', 'ISCED3'] = 1
+
+    # For private schools: use LOGR2020 and HIGR2020
+    if 'LOGR2020' in df.columns and 'HIGR2020' in df.columns:
+        for idx, row in df.iterrows():
+            if pd.isna(row['LOGR2020']) or pd.isna(row['HIGR2020']):
+                continue
+
+            low = str(row['LOGR2020']).upper()
+            high = str(row['HIGR2020']).upper()
+
+            # Pre-K
+            if low == 'PK' or high == 'PK':
+                df.loc[idx, 'ISCED010'] = 1
+
+            # Kindergarten
+            if low == 'KG' or (low <= 'KG' <= high):
+                df.loc[idx, 'ISCED020'] = 1
+
+            # Try to convert to numeric for grade ranges
+            try:
+                # Convert grade codes to numbers
+                def grade_to_num(g):
+                    g = str(g).upper()
+                    if g == 'PK':
+                        return -2
+                    elif g == 'KG':
+                        return 0
+                    else:
+                        return int(g)
+
+                low_num = grade_to_num(low)
+                high_num = grade_to_num(high)
+
+                # ISCED1: Grades 1-6
+                if (low_num <= 6 and high_num >= 1):
+                    df.loc[idx, 'ISCED1'] = 1
+
+                # ISCED2: Grades 7-9
+                if (low_num <= 9 and high_num >= 7):
+                    df.loc[idx, 'ISCED2'] = 1
+
+                # ISCED3: Grades 10-12
+                if (low_num <= 12 and high_num >= 10):
+                    df.loc[idx, 'ISCED3'] = 1
+
+            except (ValueError, TypeError):
+                # If conversion fails, skip
+                pass
+
+    return df
+
+
+# ============================================================================
 # UNITED STATES: Process shapefiles
 # ============================================================================
 
@@ -169,36 +275,79 @@ def process_united_states():
     print(f"  Public schools: {(schools_gdf['SCHOOL_TYPE'] == 'Public').sum()}")
     print(f"  Private schools: {(schools_gdf['SCHOOL_TYPE'] == 'Private').sum()}")
 
-    # Load and merge grade data (only for public schools with NCESSCH)
+    # Load grade data for both public and private schools
     print("\n[PART 4] Loading and merging grade data...")
-    grades_df = pd.read_csv(config['grades_csv'])
-    print(f"Loaded {len(grades_df)} grade records")
 
-    # Check if NCESSCH column exists (it will for public schools)
+    # Load public school grades
+    print("  Loading public school grades...")
+    grades_public = pd.read_csv(config['grades_public_csv'])
+    print(f"  Loaded {len(grades_public)} public grade records")
+
+    # Load private school grades
+    print("  Loading private school grades...")
+    grades_private = pd.read_csv(config['grades_private_csv'])
+    print(f"  Loaded {len(grades_private)} private grade records")
+
+    # Merge public schools on NCESSCH
     if 'NCESSCH' in schools_gdf.columns:
-        # Convert to string for matching
         schools_gdf['NCESSCH'] = schools_gdf['NCESSCH'].astype(str)
-        grades_df['NCESSCH'] = grades_df['NCESSCH'].astype(str)
+        grades_public['NCESSCH'] = grades_public['NCESSCH'].astype(str)
 
-        print(f"Merging on NCESSCH (public schools only)...")
+        print("  Merging public school grades on NCESSCH...")
         schools_gdf = schools_gdf.merge(
-            grades_df,
+            grades_public[['NCESSCH', 'GSLO', 'GSHI', 'LEVEL', 'G_PK_OFFERED', 'G_KG_OFFERED',
+                           'G_1_OFFERED', 'G_2_OFFERED', 'G_3_OFFERED', 'G_4_OFFERED',
+                           'G_5_OFFERED', 'G_6_OFFERED', 'G_7_OFFERED', 'G_8_OFFERED',
+                           'G_9_OFFERED', 'G_10_OFFERED', 'G_11_OFFERED', 'G_12_OFFERED']],
             on='NCESSCH',
             how='left',
-            suffixes=('', '_grades')
+            suffixes=('', '_public')
         )
 
-        print(f"Total schools after merge: {len(schools_gdf)}")
-        matched = schools_gdf['GSLO'].notna().sum()
-        print(f"Schools with grade data: {matched} ({matched / len(schools_gdf) * 100:.1f}%)")
+    # Merge private schools on PPIN
+    if 'PPIN' in schools_gdf.columns:
+        schools_gdf['PPIN'] = schools_gdf['PPIN'].astype(str)
+        grades_private['PPIN'] = grades_private['PPIN'].astype(str)
 
-        public_with_grades = ((schools_gdf['SCHOOL_TYPE'] == 'Public') & schools_gdf['GSLO'].notna()).sum()
-        public_total = (schools_gdf['SCHOOL_TYPE'] == 'Public').sum()
-        print(
-            f"  Public schools with grades: {public_with_grades}/{public_total} ({public_with_grades / public_total * 100:.1f}%)")
-        print(f"  Private schools (no grade data available): {(schools_gdf['SCHOOL_TYPE'] == 'Private').sum()}")
-    else:
-        print("WARNING: No NCESSCH column found - skipping grade merge")
+        print("  Merging private school grades on PPIN...")
+        schools_gdf = schools_gdf.merge(
+            grades_private[['PPIN', 'LOGR2020', 'HIGR2020', 'LEVEL', 'LEVEL2']],
+            on='PPIN',
+            how='left',
+            suffixes=('', '_private')
+        )
+
+    # Create ISCED columns
+    print("\n[PART 5] Creating ISCED classification columns...")
+    schools_gdf = create_isced_columns(schools_gdf)
+
+    # Print ISCED statistics
+    print(f"\n  ISCED level distribution:")
+    print(f"  ISCED010 (Pre-K): {schools_gdf['ISCED010'].sum()} schools")
+    print(f"  ISCED020 (Kindergarten): {schools_gdf['ISCED020'].sum()} schools")
+    print(f"  ISCED1 (Elementary, grades 1-6): {schools_gdf['ISCED1'].sum()} schools")
+    print(f"  ISCED2 (Junior secondary, grades 7-9): {schools_gdf['ISCED2'].sum()} schools")
+    print(f"  ISCED3 (Senior secondary, grades 10-12): {schools_gdf['ISCED3'].sum()} schools")
+
+    # Count schools with multiple ISCED levels
+    schools_gdf['ISCED_count'] = (schools_gdf['ISCED010'] + schools_gdf['ISCED020'] +
+                                  schools_gdf['ISCED1'] + schools_gdf['ISCED2'] +
+                                  schools_gdf['ISCED3'])
+
+    multi_level = (schools_gdf['ISCED_count'] > 1).sum()
+    print(f"\n  Schools with multiple ISCED levels: {multi_level} ({multi_level / len(schools_gdf) * 100:.1f}%)")
+
+    # Print grade data merge statistics
+    print(f"\n  Grade data merge statistics:")
+    public_total = (schools_gdf['SCHOOL_TYPE'] == 'Public').sum()
+    public_with_grades = ((schools_gdf['SCHOOL_TYPE'] == 'Public') & schools_gdf['GSLO'].notna()).sum()
+    print(
+        f"  Public schools with grades: {public_with_grades}/{public_total} ({public_with_grades / public_total * 100:.1f}%)")
+
+    private_total = (schools_gdf['SCHOOL_TYPE'] == 'Private').sum()
+    private_with_grades = ((schools_gdf['SCHOOL_TYPE'] == 'Private') & schools_gdf['LOGR2020'].notna()).sum()
+    print(
+        f"  Private schools with grades: {private_with_grades}/{private_total} ({private_with_grades / private_total * 100:.1f}%)")
 
     return schools_gdf, config
 
