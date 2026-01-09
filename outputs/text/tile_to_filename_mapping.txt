@@ -105,7 +105,6 @@ N55_W155        -> w155_n60_w150_n55.geojson
 N55_W160        -> w160_n60_w155_n55.geojson
 N55_W165        -> w165_n60_w160_n55.geojson
 N60_W080        -> w080_n65_w075_n60.geojson
-N60_W085        -> w085_n65_w080_n60.geojson
 N60_W105        -> w105_n65_w100_n60.geojson
 N60_W110        -> w110_n65_w105_n60.geojson
 N60_W115        -> w115_n65_w110_n60.geojson
@@ -118,7 +117,6 @@ N60_W150        -> w150_n65_w145_n60.geojson
 N60_W155        -> w155_n65_w150_n60.geojson
 N60_W160        -> w160_n65_w155_n60.geojson
 N60_W165        -> w165_n65_w160_n60.geojson
-N65_W085        -> w085_n70_w080_n65.geojson
 N65_W125        -> w125_n70_w120_n65.geojson
 N65_W135        -> w135_n70_w130_n65.geojson
 N65_W140        -> w140_n70_w135_n65.geojson

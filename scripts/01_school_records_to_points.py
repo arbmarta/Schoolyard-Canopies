@@ -83,18 +83,17 @@ def process_canada():
     print(f"Total dataset length: {len(can_df)}")
     print(f"Post-secondary records (ISCED4Plus == 1): {(can_df['ISCED4Plus'] == 1).sum()}")
 
-    # Filter out exclusively post-secondary institutions
-    exclusively_post_secondary = (
-            (can_df['ISCED4Plus'] == 1) &
-            (can_df['ISCED010'] == 0) &
-            (can_df['ISCED020'] == 0) &
-            (can_df['ISCED1'] == 0) &
-            (can_df['ISCED2'] == 0) &
-            (can_df['ISCED3'] == 0)
+    # Filter to include ONLY schools with at least one K-12 level
+    has_k12_education = (
+            (can_df['ISCED010'] == 1) |
+            (can_df['ISCED020'] == 1) |
+            (can_df['ISCED1'] == 1) |
+            (can_df['ISCED2'] == 1) |
+            (can_df['ISCED3'] == 1)
     )
 
-    print(f"Exclusively post-secondary records: {exclusively_post_secondary.sum()}")
-    can_df = can_df[~exclusively_post_secondary]
+    print(f"Schools with at least one K-12 ISCED level: {has_k12_education.sum()}")
+    can_df = can_df[has_k12_education]
     print(f"Records after filtering: {len(can_df)}")
 
     # Create point geometries
