@@ -8,6 +8,9 @@ Sources:
 - United States (2019-2020): https://nces.ed.gov/ccd/files.asp#Fiscal:2,LevelId:7,SchoolYearId:34,Page:1
 - United States (2019-2020): https://nces.ed.gov/surveys/pss/pssdata.asp
 
+Excludes schools in the Arctic Cordillera and Tundra
+- Based on terrestrial ecoregions Level 1 (cec.org/north-american-environmental-atlas/terrestrial-ecoregions-level-i/)
+
 CRS:
 - Canada: EPSG:3347 (Statistics Canada Lambert)
 - United States: EPSG:5070 (NAD83 / Conus Albers)
@@ -50,6 +53,9 @@ COUNTRIES = {
         'output_path': '../inputs/schools/united_states/us_school_points.gpkg'
     }
 }
+
+north_of_tree_line = gpd.read_file('../inputs/ecoregions_level1/NA_Terrestrial_Ecoregions_v2_level1.shp')
+north_of_tree_line = north_of_tree_line[north_of_tree_line['NameL1_En'].isin(['Arctic Cordillera', 'Tundra'])]
 
 
 # ============================================================================
@@ -113,6 +119,20 @@ def process_canada():
     print(f"Created {len(schools_gdf)} school points")
     print(f"Reprojecting to {config['crs']}...")
     schools_gdf = schools_gdf.to_crs(config['crs'])
+
+    # Filter out schools north of tree line
+    print("\n[PART 3] Filtering schools north of tree line...")
+    tree_line = north_of_tree_line.to_crs(config['crs'])
+
+    # Find schools within Arctic Cordillera/Tundra regions
+    schools_in_arctic = gpd.sjoin(schools_gdf, tree_line, how='inner', predicate='within')
+    north_count = len(schools_in_arctic)
+
+    print(f"Schools north of tree line (Arctic Cordillera/Tundra): {north_count}")
+
+    # Keep only schools NOT in these regions
+    schools_gdf = schools_gdf[~schools_gdf.index.isin(schools_in_arctic.index)]
+    print(f"Records after filtering: {len(schools_gdf)}")
 
     return schools_gdf, config
 
@@ -352,6 +372,20 @@ def process_united_states():
     private_with_grades = ((schools_gdf['SCHOOL_TYPE'] == 'Private') & schools_gdf['LOGR2020'].notna()).sum()
     print(
         f"  Private schools with grades: {private_with_grades}/{private_total} ({private_with_grades / private_total * 100:.1f}%)")
+
+    # Filter out schools north of tree line
+    print("\n[PART 6] Filtering schools north of tree line...")
+    tree_line = north_of_tree_line.to_crs(config['crs'])
+
+    # Find schools within Arctic Cordillera/Tundra regions (should be minimal for US)
+    schools_in_arctic = gpd.sjoin(schools_gdf, tree_line, how='inner', predicate='within')
+    north_count = len(schools_in_arctic)
+
+    print(f"Schools north of tree line (Arctic Cordillera/Tundra): {north_count}")
+
+    # Keep only schools NOT in these regions
+    schools_gdf = schools_gdf[~schools_gdf.index.isin(schools_in_arctic.index)]
+    print(f"Records after filtering: {len(schools_gdf)}")
 
     return schools_gdf, config
 

@@ -241,66 +241,34 @@ print(f"3. {mapping_file}")
 print(f"\n{'=' * 60}")
 print("READY TO DOWNLOAD!")
 print(f"{'=' * 60}")
+
+rsync_pattern_cygwin = str(rsync_pattern_file).replace('\\', '/')
+if rsync_pattern_cygwin[1] == ':':  # Windows absolute path like C:\...
+    drive = rsync_pattern_cygwin[0].lower()
+    rsync_pattern_cygwin = f"/cygdrive/{drive}{rsync_pattern_cygwin[2:]}"
+
 print(f"""
 Total tiles to download: {len(sorted_tiles)}
 Estimated size: {len(urban_in_list) * 4 + other_count * 0.2:.1f} GB (average)
 
-In Cygwin terminal, run:
+In Cygwin terminal, navigate to your project's scripts directory, then run:
+
+# First, find where you are
+pwd
+
+# Navigate to your project directory
+cd "/cygdrive/c/Users/alexj/Documents/Research/Canopy Cover Mapping/Schoolyard-Canopies/scripts"
+
+# Verify the pattern file exists
+ls -la ../outputs/text/rsync_include_pattern_lod1_only.txt
 
 export RSYNC_PASSWORD='m1782307'
 
-rsync -avP --include-from={rsync_pattern_file} \\
+rsync -avP --include-from={rsync_pattern_cygwin} \\
       rsync://m1782307@dataserv.ub.tum.de/m1782307/ \\
-      ./building_data/
+      ../building_data/
 
 The download can be interrupted and resumed - just re-run the same command.
 """)
 
 print(f"{'=' * 60}")
-
-# ============================================================================
-# Explore FTP server structure before downloading
-# ============================================================================
-
-FTP_HOST = 'dataserv.ub.tum.de'
-FTP_USER = 'm1782307'
-FTP_PASS = 'm1782307'
-
-print("Exploring FTP Server Structure...\n")
-
-try:
-    ftp = FTP(FTP_HOST, timeout=30)
-    ftp.login(FTP_USER, FTP_PASS)
-
-    print("✓ Connected successfully!\n")
-
-    # Get current directory
-    print(f"Current directory: {ftp.pwd()}")
-
-    # List root directory
-    print("\n--- Root Directory Contents ---")
-    files = []
-    ftp.retrlines('LIST', files.append)
-
-    for item in files:
-        print(item)
-
-    # Save to file
-    with open('outputs/ftp_structure.txt', 'w') as f:
-        f.write("FTP Server Structure\n")
-        f.write("=" * 60 + "\n\n")
-        f.write(f"Current directory: {ftp.pwd()}\n\n")
-        for item in files:
-            f.write(f"{item}\n")
-
-    print("\n\nStructure saved to: ftp_structure.txt")
-    print("\nPlease check this file to understand how files are organized.")
-
-    ftp.quit()
-
-except Exception as e:
-    print(f"Error: {e}")
-    print("\nThis suggests:")
-    print("1. FTP might be blocked by firewall")
-    print("2. Credentials might be incorrect")
-    print("3. Server might not allow FTP connections")
