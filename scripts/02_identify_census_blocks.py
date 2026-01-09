@@ -160,6 +160,28 @@ def process_country(country_name, config):
             else:
                 final_count = len(master_gdf)
 
+            # Count schools outside census blocks (need to reload all census blocks)
+            print(f"\nCounting schools outside census blocks...")
+            all_census_blocks = []
+            for shp_file in census_shps:
+                try:
+                    census_gdf = gpd.read_file(shp_file)
+                    if census_gdf.crs.to_epsg() != config['epsg']:
+                        census_gdf = census_gdf.to_crs(config['crs'])
+                    all_census_blocks.append(census_gdf)
+                except Exception as e:
+                    continue
+
+            all_census = pd.concat(all_census_blocks, ignore_index=True)
+            schools_in_blocks = gpd.sjoin(
+                schools_gdf,
+                all_census,
+                how='left',
+                predicate='within'
+            )
+            schools_outside = schools_in_blocks[schools_in_blocks.index_right.isna()]
+            print(f"Schools outside census blocks: {len(schools_outside)}")
+
         else:
             # Canada: Single shapefile
             print(f"Loading census blocks from: {census_path.name}")
@@ -192,6 +214,17 @@ def process_country(country_name, config):
             master_gdf = census_gdf.loc[unique_block_indices].copy()
 
             print(f"Census blocks containing schools: {len(master_gdf)}")
+
+            # Count schools outside census blocks
+            schools_in_blocks = gpd.sjoin(
+                schools_gdf,
+                census_gdf,
+                how='left',
+                predicate='within'
+            )
+            schools_outside = schools_in_blocks[schools_in_blocks.index_right.isna()]
+            print(f"Schools outside census blocks: {len(schools_outside)}")
+
             final_count = len(master_gdf)
 
             if final_count == 0:
