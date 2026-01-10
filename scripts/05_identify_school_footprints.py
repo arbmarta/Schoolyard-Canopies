@@ -564,7 +564,126 @@ def process_country(country_name, config, use_osm=True):
         unmatched_schools = None
 
     # ========================================================================
-    # PART 5: OSM Geocoding and Retry (if enabled)
+    # PART 5: Retry with 3-meter buffer for unmatched schools
+    # ========================================================================
+    if unmatched_schools is not None and len(unmatched_schools) > 0:
+        print("\n[PART 5] Retrying unmatched schools with 3-meter buffer...")
+
+        try:
+            # Create buffered version of unmatched schools in DuckDB
+            buffer_sql = f"""
+            SELECT 
+                s.* EXCLUDE {school_geom_col},
+                ST_Buffer(
+                    ST_Transform(s.{school_geom_col}, 'EPSG:{school_srid}', 'EPSG:{target_srid}'),
+                    3.0
+                ) as geom_buffered
+            FROM schools s
+            WHERE s.rowid NOT IN (
+                SELECT DISTINCT s2.rowid
+                FROM schools s2
+                INNER JOIN buildings b
+                ON ST_Intersects(
+                    ST_Transform(s2.{school_geom_col}, 'EPSG:{school_srid}', 'EPSG:{target_srid}'),
+                    ST_Transform(b.{building_geom_col}, 'EPSG:{building_srid}', 'EPSG:{target_srid}')
+                )
+            )
+            """
+
+            con.execute("CREATE OR REPLACE TABLE schools_buffered AS " + buffer_sql)
+
+            # Try matching with buffered schools
+            buffered_match_sql = f"""
+            SELECT 
+                b.* EXCLUDE {building_geom_col},
+                s.rowid as school_rowid,
+                ST_AsWKB(ST_Transform(b.{building_geom_col}, 'EPSG:{building_srid}', '{target_crs}')) AS geom_wkb
+            FROM buildings b
+            INNER JOIN schools_buffered s
+            ON ST_Intersects(
+                ST_Transform(b.{building_geom_col}, 'EPSG:{building_srid}', 'EPSG:{target_srid}'),
+                s.geom_buffered
+            )
+            """
+
+            buffered_result_df = con.execute(buffered_match_sql).df()
+
+            if len(buffered_result_df) > 0:
+                # Convert WKB to geometry
+                buffered_result_df['geometry'] = buffered_result_df['geom_wkb'].apply(lambda x: wkb.loads(bytes(x)))
+                buffered_result_df = buffered_result_df.drop('geom_wkb', axis=1)
+
+                buffered_matches = gpd.GeoDataFrame(buffered_result_df, geometry='geometry', crs=target_crs)
+
+                # Remove duplicates
+                buffered_matches = buffered_matches.drop_duplicates(subset=['geometry'])
+
+                print(f"  ✓ Found {len(buffered_matches):,} additional buildings with 3m buffer")
+
+                # Combine with original school footprints
+                school_footprints = pd.concat([school_footprints, buffered_matches], ignore_index=True)
+                school_footprints = school_footprints.drop_duplicates(subset=['geometry'])
+
+                # Update matched count
+                newly_matched_school_ids = set(buffered_result_df['school_rowid'].unique())
+                matched_count += len(newly_matched_school_ids)
+                unmatched_count = school_count - matched_count
+
+                # Update unmatched schools list
+                unmatched_sql_updated = f"""
+                SELECT 
+                    s.* EXCLUDE {school_geom_col},
+                    ST_AsWKB(ST_Transform(s.{school_geom_col}, 'EPSG:{school_srid}', '{target_crs}')) AS geom_wkb
+                FROM schools s
+                WHERE s.rowid NOT IN (
+                    SELECT DISTINCT s2.rowid
+                    FROM schools s2
+                    INNER JOIN buildings b
+                    ON ST_Intersects(
+                        ST_Transform(s2.{school_geom_col}, 'EPSG:{school_srid}', 'EPSG:{target_srid}'),
+                        ST_Transform(b.{building_geom_col}, 'EPSG:{building_srid}', 'EPSG:{target_srid}')
+                    )
+
+                    UNION
+
+                    SELECT DISTINCT s3.rowid
+                    FROM schools_buffered s3
+                    INNER JOIN buildings b2
+                    ON ST_Intersects(
+                        ST_Transform(b2.{building_geom_col}, 'EPSG:{building_srid}', 'EPSG:{target_srid}'),
+                        s3.geom_buffered
+                    )
+                )
+                """
+
+                unmatched_df_updated = con.execute(unmatched_sql_updated).df()
+
+                if len(unmatched_df_updated) > 0:
+                    unmatched_df_updated['geometry'] = unmatched_df_updated['geom_wkb'].apply(
+                        lambda x: wkb.loads(bytes(x)))
+                    unmatched_df_updated = unmatched_df_updated.drop('geom_wkb', axis=1)
+                    unmatched_schools = gpd.GeoDataFrame(unmatched_df_updated, geometry='geometry', crs=target_crs)
+                else:
+                    unmatched_schools = None
+
+                print(f"  Updated stats:")
+                print(
+                    f"    Schools WITH footprints: {matched_count:,}/{school_count:,} ({matched_count / school_count * 100:.2f}%)")
+                print(
+                    f"    Schools WITHOUT footprints: {unmatched_count:,}/{school_count:,} ({unmatched_count / school_count * 100:.2f}%)")
+            else:
+                print("  No additional matches found with 3m buffer")
+
+            # Clean up
+            con.execute("DROP TABLE IF EXISTS schools_buffered")
+
+        except Exception as e:
+            print(f"  Warning: Buffer retry failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+    # ========================================================================
+    # PART 6: OSM Geocoding and Retry (if enabled)
     # ========================================================================
     osm_matched = None
 
@@ -609,7 +728,7 @@ def process_country(country_name, config, use_osm=True):
     con.close()
 
     # ========================================================================
-    # PART 6: Save outputs
+    # PART 7: Save outputs
     # ========================================================================
     print("\n[PART 6] Saving outputs...")
 
