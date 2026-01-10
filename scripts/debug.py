@@ -1,27 +1,30 @@
-import geopandas as gpd
-import matplotlib.pyplot as plt
+"""
+Print CRS of GeoJSON files and output GPKG.
+"""
 
-gdf = gpd.read_file("../outputs/buildings_near_schools.gpkg")
+import fiona
+from pathlib import Path
 
-# Ensure WGS84
-if gdf.crs is not None and gdf.crs.to_epsg() != 4326:
-    gdf = gdf.to_crs(epsg=4326)
+# ---------- CONFIG ----------
+BUILDING_DIR = Path("../building_data/LoD1/northamerica")
+OUTPUT_GPKG = Path("../outputs/buildings_near_schools.gpkg")
+# ----------------------------
 
-# Sample for speed
-gdf_plot = gdf.sample(frac=0.05, random_state=1)
+print("GeoJSON CRS:")
+for geojson in sorted(BUILDING_DIR.glob("w085_n55_w080_n50.geojson")):
+    with fiona.open(str(geojson), "r") as src:
+        print(f"  {geojson.name}: {src.crs}")
 
-fig, ax = plt.subplots(figsize=(10, 10))
+print(f"\nOutput GPKG CRS:")
+if OUTPUT_GPKG.exists():
+    with fiona.open(str(OUTPUT_GPKG), layer="buildings") as src:
+        print(f"  {OUTPUT_GPKG.name}: {src.crs}")
+else:
+    print(f"  {OUTPUT_GPKG.name}: File not found")
 
-gdf_plot.plot(
-    ax=ax,
-    linewidth=0.3,
-    edgecolor="black",
-    facecolor="none",
-    aspect=None   # <<< THIS FIXES THE ERROR
-)
 
-ax.set_title("Buildings Near Schools (5% sample)")
-ax.set_xlabel("Longitude")
-ax.set_ylabel("Latitude")
-
-plt.show()
+"""
+Output GPKG CRS:
+  buildings_near_schools.gpkg: EPSG:4326
+GeoJSON CRS:
+"""

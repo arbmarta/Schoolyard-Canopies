@@ -13,11 +13,11 @@ import duckdb
 from pathlib import Path
 import time
 import traceback
-import fiona
 from pyproj import CRS
 import geopandas as gpd
-import os
 import pandas as pd
+import fiona
+from shapely.geometry import mapping
 
 # ---------- CONFIG ----------
 BUILDING_DIR = Path("../building_data/LoD1/northamerica")
@@ -25,7 +25,8 @@ US_CENSUS = Path("../inputs/census_blocks/united_states/us_census_blocks_with_sc
 CANADA_CENSUS = Path("../inputs/census_blocks/canada/Canada_census_blocks_with_schools.gpkg")
 
 OUTPUT_GPKG = Path("../outputs/buildings_near_schools.gpkg")
-OUTPUT_CRS = "EPSG:4326"
+OUTPUT_EPSG = 3857
+OUTPUT_CRS = f"EPSG:{OUTPUT_EPSG}"
 N_THREADS = 4
 FILE_STABILITY_WAIT = 15 # 15 second wait time to check file stability
 MIN_FILE_SIZE = 1000 # Processes files at least 1 MB in size
@@ -87,26 +88,46 @@ def _is_stable(p: Path, wait=FILE_STABILITY_WAIT):
         return False
 
 
-def load_census_once(con, census_path: Path, table_name: str):
-    """Load census blocks into DuckDB (done once at startup)."""
+def load_census_once(con, census_path: Path, table_name: str, target_epsg:int):
+    """Load census blocks into DuckDB and transform to OUTPUT_CRS (done once at startup)."""
     if not census_path.exists():
         return None
     try:
         print(f"Loading {census_path.name}...")
-        con.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM ST_Read('{census_path}')")
-
-        geom_col = _detect_geom_col(con, table_name)
+        # Create a temp table from read then transform geometry column to OUTPUT_CRS
+        con.execute(f"CREATE OR REPLACE TABLE {table_name}_raw AS SELECT * FROM ST_Read('{census_path}')")
+        geom_col = _detect_geom_col(con, f"{table_name}_raw")
         if geom_col is None:
             print(f"  ✗ No geometry column in {census_path.name}")
+            con.execute(f"DROP TABLE IF EXISTS {table_name}_raw")
             return None
 
-        srid = _get_srid_via_fiona(census_path)
+        # detect source srid
+        src_srid = _get_srid_via_fiona(census_path)
+        if src_srid is None:
+            print(f"  ✗ Could not detect SRID for {census_path.name}")
+            con.execute(f"DROP TABLE IF EXISTS {table_name}_raw")
+            return None
+
+        # Create a transformed table in OUTPUT_CRS (done once)
+        con.execute(f"""
+            CREATE OR REPLACE TABLE {table_name} AS
+            SELECT * EXCLUDE {geom_col},
+                   ST_Transform({geom_col}, 'EPSG:{src_srid}', 'EPSG:{target_epsg}') AS geom
+            FROM {table_name}_raw
+        """)
+        con.execute(f"DROP TABLE IF EXISTS {table_name}_raw")
+
         count = con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
-        print(f"  ✓ Loaded {count:,} census blocks (SRID: {srid})")
-        return srid
+        print(f"  ✓ Loaded & transformed {count:,} census blocks (from SRID {src_srid} -> EPSG:{target_epsg})")
+        return src_srid
     except Exception as e:
         print(f"  ✗ Failed to load {census_path.name}:", e)
         traceback.print_exc()
+        try:
+            con.execute(f"DROP TABLE IF EXISTS {table_name}_raw")
+        except:
+            pass
         return None
 
 
@@ -115,27 +136,23 @@ def process_tile(con, tile_path: Path, us_srid: int, canada_srid: int):
     Process one building tile:
     - Join with US census blocks
     - Join with Canada census blocks
-    - Return filtered buildings in OUTPUT_CRS
+    - Return filtered buildings in OUTPUT_CRS (EPSG int stored in OUTPUT_EPSG)
     """
     tmp_buildings = "buildings_tmp"
 
     try:
         # Get file size
         file_size_bytes = tile_path.stat().st_size
-        file_size_mb = file_size_bytes / (1024 * 1024)  # Convert to MB
-        file_size_gb = file_size_bytes / (1024 * 1024 * 1024)  # Convert to GB
+        file_size_mb = file_size_bytes / (1024 * 1024)
+        file_size_gb = file_size_bytes / (1024 * 1024 * 1024)
 
-        # Format size nicely
-        if file_size_gb >= 1:
-            size_str = f"{file_size_gb:.2f} GB"
-        else:
-            size_str = f"{file_size_mb:.2f} MB"
+        size_str = f"{file_size_gb:.2f} GB" if file_size_gb >= 1 else f"{file_size_mb:.2f} MB"
 
         print(f"\n{'=' * 60}")
         print(f"Processing: {tile_path.name} ({size_str})")
         print(f"{'=' * 60}")
 
-        # Load buildings
+        # Load buildings into DuckDB
         print("  Loading buildings into DuckDB...")
         con.execute(f"CREATE OR REPLACE TABLE {tmp_buildings} AS SELECT * FROM ST_Read('{tile_path}')")
 
@@ -161,71 +178,104 @@ def process_tile(con, tile_path: Path, us_srid: int, canada_srid: int):
 
         results = []
 
-        # TRY US CENSUS
+        # ENSURE we have a buildings table in OUTPUT_EPSG for joining
+        buildings_for_join = tmp_buildings
+        transformed_table = None
+        if b_srid != OUTPUT_EPSG:
+            transformed_table = f"{tmp_buildings}_xform"
+            try:
+                con.execute(f"DROP TABLE IF EXISTS {transformed_table}")
+                con.execute(f"""
+                    CREATE OR REPLACE TABLE {transformed_table} AS
+                    SELECT * EXCLUDE {geom_col},
+                           ST_Transform({geom_col}, 'EPSG:{b_srid}', 'EPSG:{OUTPUT_EPSG}') AS geom
+                    FROM {tmp_buildings}
+                """)
+                buildings_for_join = transformed_table
+            except Exception as e:
+                print(f"  ✗ Failed to create transformed buildings table: {e}")
+                buildings_for_join = tmp_buildings
+
+        # choose the geometry column name we will use in SQL (transformed table uses "geom")
+        join_geom = "geom" if buildings_for_join != tmp_buildings else geom_col
+        print(f"  Using buildings table `{buildings_for_join}` with geometry column `{join_geom}`")
+
+        # Perform joins using pre-transformed census (assumed loaded into OUTPUT_EPSG)
         if us_srid is not None:
             print(f"  Checking US census blocks...")
-            sql = f"""
-                SELECT b.* EXCLUDE {geom_col},
-                       ST_AsWKB(ST_Transform(b.{geom_col}, 'EPSG:{b_srid}', '{OUTPUT_CRS}')) AS geom_wkb
-                FROM {tmp_buildings} b
+            sql_us = f"""
+                SELECT b.* EXCLUDE {join_geom},
+                       ST_AsWKB(b.{join_geom}) AS geom_wkb
+                FROM {buildings_for_join} b
                 INNER JOIN census_us c
-                  ON ST_Intersects(
-                      ST_Transform(b.{geom_col}, 'EPSG:{b_srid}', 'EPSG:{us_srid}'),
-                      c.geom
-                  )
+                  ON ST_Intersects(b.{join_geom}, c.geom)
             """
 
             try:
-                us_matches = con.execute(f"SELECT COUNT(*) FROM ({sql})").fetchone()[0]
+                us_matches = con.execute(f"SELECT COUNT(*) FROM ({sql_us})").fetchone()[0]
                 if us_matches > 0:
                     print(f"    ✓ Found {us_matches:,} buildings in US school areas")
-                    df = con.execute(sql).df()
+                    df = con.execute(sql_us).df()
                     results.append(df)
                 else:
                     print(f"    No US matches")
             except Exception as e:
                 print(f"    ✗ US join failed: {e}")
 
-        # TRY CANADA CENSUS
         if canada_srid is not None:
             print(f"  Checking Canada census blocks...")
-            sql = f"""
-                SELECT b.* EXCLUDE {geom_col},
-                       ST_AsWKB(ST_Transform(b.{geom_col}, 'EPSG:{b_srid}', '{OUTPUT_CRS}')) AS geom_wkb
-                FROM {tmp_buildings} b
+            sql_ca = f"""
+                SELECT b.* EXCLUDE {join_geom},
+                       ST_AsWKB(b.{join_geom}) AS geom_wkb
+                FROM {buildings_for_join} b
                 INNER JOIN census_canada c
-                  ON ST_Intersects(
-                      ST_Transform(b.{geom_col}, 'EPSG:{b_srid}', 'EPSG:{canada_srid}'),
-                      c.geom
-                  )
+                  ON ST_Intersects(b.{join_geom}, c.geom)
             """
-
             try:
-                ca_matches = con.execute(f"SELECT COUNT(*) FROM ({sql})").fetchone()[0]
+                ca_matches = con.execute(f"SELECT COUNT(*) FROM ({sql_ca})").fetchone()[0]
                 if ca_matches > 0:
                     print(f"    ✓ Found {ca_matches:,} buildings in Canada school areas")
-                    df = con.execute(sql).df()
+                    df = con.execute(sql_ca).df()
                     results.append(df)
                 else:
                     print(f"    No Canada matches")
             except Exception as e:
                 print(f"    ✗ Canada join failed: {e}")
 
-        # Cleanup
-        con.execute(f"DROP TABLE IF EXISTS {tmp_buildings}")
+        # Cleanup temp tables
+        try:
+            con.execute(f"DROP TABLE IF EXISTS {tmp_buildings}")
+        except:
+            pass
+
+        if transformed_table:
+            try:
+                con.execute(f"DROP TABLE IF EXISTS {transformed_table}")
+            except:
+                pass
 
         if not results:
             print("  → No buildings in school areas")
             return None
 
-        # Combine US + Canada results if both exist
+        # Combine results and convert WKB -> geometry safely (handle nulls)
         combined = pd.concat(results, ignore_index=True)
-
-        # Convert WKB to GeoDataFrame
         from shapely import wkb
-        combined['geometry'] = combined['geom_wkb'].apply(lambda x: wkb.loads(bytes(x)))
-        combined = combined.drop('geom_wkb', axis=1)
+        def _wkb_to_geom(val):
+            try:
+                if val is None:
+                    return None
+                if isinstance(val, memoryview):
+                    val = val.tobytes()
+                return wkb.loads(bytes(val))
+            except Exception:
+                return None
+
+        combined['geometry'] = combined['geom_wkb'].apply(_wkb_to_geom)
+        combined = combined.drop(columns=['geom_wkb'], errors='ignore')
         gdf = gpd.GeoDataFrame(combined, geometry='geometry', crs=OUTPUT_CRS)
+        # Optionally drop rows with missing geometry:
+        gdf = gdf[~gdf.geometry.isna()]
 
         print(f"  ✓ Total filtered buildings: {len(gdf):,}")
         return gdf
@@ -240,28 +290,103 @@ def process_tile(con, tile_path: Path, us_srid: int, canada_srid: int):
         return GEOM_ERROR
 
 
-def append_to_gpkg(gdf: gpd.GeoDataFrame, output_path: Path):
-    """Append buildings to the master GPKG (with error handling)."""
+def _pandas_to_fiona_props(df: pd.DataFrame):
+    """Minimal, portable dtype -> Fiona property type mapping (no width suffixes)."""
+    props = {}
+    for col, dtype in df.dtypes.items():
+        if col == "geometry":
+            continue
+        if pd.api.types.is_integer_dtype(dtype):
+            props[col] = 'int'
+        elif pd.api.types.is_float_dtype(dtype):
+            props[col] = 'float'
+        elif pd.api.types.is_bool_dtype(dtype):
+            props[col] = 'bool'
+        elif pd.api.types.is_datetime64_dtype(dtype):
+            props[col] = 'datetime'
+        else:
+            props[col] = 'str'
+    return props
+
+
+def append_to_gpkg(gdf: gpd.GeoDataFrame, output_path: Path, layer_name="buildings"):
+    """Append buildings to the master GPKG (in-place append via Fiona)."""
     try:
-        # Ensure output directory exists
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if output_path.exists():
-            # Read existing, concat, write back (safer but slower for large files)
-            existing = gpd.read_file(output_path, layer="buildings")
-            combined = pd.concat([existing, gdf], ignore_index=True)
+        # Build Fiona schema (portable types)
+        props = _pandas_to_fiona_props(gdf)
+        geom_types = list(gdf.geom_type.unique())
+        geom_type = geom_types[0] if len(geom_types) == 1 else "GeometryCollection"
+        schema = {"geometry": geom_type, "properties": props}
 
-            # Use proper .gpkg.tmp extension to avoid warning
-            tmp_path = output_path.parent / f"{output_path.stem}_tmp.gpkg"
-            combined.to_file(tmp_path, driver="GPKG", layer="buildings")
-            os.replace(tmp_path, output_path)
-            print(f"  ✓ Appended {len(gdf):,} buildings (total: {len(combined):,})")
-        else:
-            gdf.to_file(output_path, driver="GPKG", layer="buildings")
-            print(f"  ✓ Created {output_path.name} with {len(gdf):,} buildings")
+        # Prepare records (filter out missing/empty geometries)
+        def row_to_record(row):
+            geom = row.geometry
+            if geom is None or getattr(geom, "is_empty", False):
+                return None
+            props_dict = row.drop(labels='geometry').to_dict()
+            props_dict = {k: (None if pd.isna(v) else v) for k, v in props_dict.items()}
+            return {"geometry": mapping(geom), "properties": props_dict}
+
+        records = []
+        for _, row in gdf.iterrows():
+            rec = row_to_record(row)
+            if rec is not None:
+                records.append(rec)
+
+        # Create layer if missing
+        if not output_path.exists():
+            with fiona.open(
+                    str(output_path),
+                    mode='w',
+                    driver='GPKG',
+                    layer=layer_name,
+                    schema=schema,
+                    crs=CRS.from_epsg(OUTPUT_EPSG).to_wkt("WKT1_GDAL")
+            ) as dst:
+                if records:
+                    dst.writerecords(records)
+            print(f"  ✓ Created {output_path.name} with {len(records):,} buildings")
+            return
+
+        # When appending, align columns with existing schema
+        with fiona.open(str(output_path), layer=layer_name, mode='r') as src:
+            existing_schema = src.schema
+            existing_props = existing_schema['properties']
+
+        # Add missing columns to gdf (fill with None)
+        for prop_name in existing_props.keys():
+            if prop_name not in gdf.columns:
+                gdf[prop_name] = None
+
+        # Drop columns not in schema (or warn user)
+        extra_cols = set(gdf.columns) - set(existing_props.keys()) - {'geometry'}
+        if extra_cols:
+            print(f"  ⚠️  Warning: Dropping columns not in schema: {extra_cols}")
+            gdf = gdf.drop(columns=list(extra_cols))
+
+        # Build records aligned to existing schema (only iterate ONCE)
+        records = []
+        for _, row in gdf.iterrows():
+            geom = row.geometry
+            if geom is None or getattr(geom, "is_empty", False):
+                continue
+            props_dict = row.drop(labels='geometry').to_dict()
+            props_dict = {k: (None if pd.isna(v) else v) for k, v in props_dict.items()}
+            records.append({"geometry": mapping(geom), "properties": props_dict})
+
+        # Append in place
+        with fiona.open(str(output_path), layer=layer_name, mode='a') as dst:
+            if records:
+                dst.writerecords(records)
+
+        print(f"  ✓ Appended {len(records):,} buildings")
+
     except Exception as e:
         print(f"  ✗ Failed to write to GPKG: {e}")
         traceback.print_exc()
+
 
 def main():
     # Connect to DuckDB
@@ -286,8 +411,13 @@ def main():
     print("\n" + "=" * 60)
     print("LOADING CENSUS BLOCKS")
     print("=" * 60)
-    us_srid = load_census_once(con, US_CENSUS, "census_us")
-    canada_srid = load_census_once(con, CANADA_CENSUS, "census_canada")
+    us_srid = load_census_once(con, US_CENSUS, "census_us", OUTPUT_EPSG)
+    canada_srid = load_census_once(con, CANADA_CENSUS, "census_canada", OUTPUT_EPSG)
+
+    if us_srid is not None:
+        print(f"\n  census_us rows: {con.execute('SELECT COUNT(*) FROM census_us').fetchone()[0]}")
+    if canada_srid is not None:
+        print(f"  census_canada rows: {con.execute('SELECT COUNT(*) FROM census_canada').fetchone()[0]}")
 
     if us_srid is None and canada_srid is None:
         print("\n✗ No census blocks loaded - aborting")
