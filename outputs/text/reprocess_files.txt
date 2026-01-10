@@ -1,0 +1,33 @@
+# Include directory structure
++ LoD1/
++ LoD1/northamerica/
++ LoD1/oceania/
+
+# Include specific LoD1 tile files
++ LoD1/oceania/w155_n20_w150_n15.geojson # Good
++ LoD1/oceania/w160_n25_w155_n20.geojson # Good
+
+
++ LoD1/northamerica/w090_n60_w085_n55.geojson # Good
++ LoD1/northamerica/w130_n60_w125_n55.geojson # Good
+
+# Files where the EPSG was wrong
++ LoD1/northamerica/w075_n45_w070_n40.geojson # Good
++ LoD1/northamerica/w080_n40_w075_n35.geojson # Good
+
+# Unpopulated areas
++ LoD1/northamerica/w085_n60_w080_n55.geojson
++ LoD1/northamerica/w140_n15_w135_n10.geojson
++ LoD1/northamerica/w145_n15_w140_n10.geojson
++ LoD1/northamerica/w155_n25_w150_n20.geojson
+
+# Not present in dataset
++ LoD1/oceania/w170_s10_w165_s15.geojson # Duplicate of below
++ LoD1/northamerica/w170_n-10_w165_n-15.geojson
+
+# Exclude everything else
+- *
+
+# rsync -avP --include-from=../outputs/text/reprocess_files.txt \
+#      rsync://m1782307@dataserv.ub.tum.de/m1782307/ \
+#      ../building_data/

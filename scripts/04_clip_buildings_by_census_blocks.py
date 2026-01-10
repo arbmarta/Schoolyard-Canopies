@@ -32,6 +32,8 @@ FILE_STABILITY_WAIT = 15 # 15 second wait time to check file stability
 MIN_FILE_SIZE = 1000 # Processes files at least 1 MB in size
 PROCESSING_LOG = Path("../outputs/text/TUM_geojson_processing_log.txt")
 BATCH_SIZE = 10000  # Process buildings in chunks to manage memory
+DELETE_PROCESSED_FILES = False  # Set to True to delete files after processing
+
 # ----------------------------
 
 GEOM_ERROR = object()
@@ -137,15 +139,19 @@ def process_tile(con, tile_path: Path, us_srid: int, canada_srid: int):
     - Join with US census blocks
     - Join with Canada census blocks
     - Return filtered buildings in OUTPUT_CRS (EPSG int stored in OUTPUT_EPSG)
+
+    Notes:
+    - Avoids ST_SetSRID (compatibility issue with your DuckDB build).
+    - Heuristically detects when a declared EPSG:4326 file actually contains projected meters,
+      and in that case *does not* reproject (uses the table as-is).
     """
     tmp_buildings = "buildings_tmp"
 
     try:
-        # Get file size
+        # Get file size (for logging)
         file_size_bytes = tile_path.stat().st_size
         file_size_mb = file_size_bytes / (1024 * 1024)
         file_size_gb = file_size_bytes / (1024 * 1024 * 1024)
-
         size_str = f"{file_size_gb:.2f} GB" if file_size_gb >= 1 else f"{file_size_mb:.2f} MB"
 
         print(f"\n{'=' * 60}")
@@ -162,7 +168,7 @@ def process_tile(con, tile_path: Path, us_srid: int, canada_srid: int):
             con.execute(f"DROP TABLE IF EXISTS {tmp_buildings}")
             return GEOM_ERROR
 
-        # Get building SRID
+        # Get building SRID (try SQL first, fallback to Fiona)
         try:
             b_srid = con.execute(f"SELECT ST_SRID({geom_col}) FROM {tmp_buildings} LIMIT 1").fetchone()[0]
             b_srid = int(b_srid)
@@ -178,10 +184,78 @@ def process_tile(con, tile_path: Path, us_srid: int, canada_srid: int):
 
         results = []
 
-        # ENSURE we have a buildings table in OUTPUT_EPSG for joining
+        # -------------------------
+        # Heuristic: are the coordinates already projected (meters)?
+        # We'll inspect a quick numeric extent on X/Y to see if values look like degrees (~ -180..180 / -90..90)
+        # or meters (large magnitude, e.g. |x| > 1e5).
+        # This uses ST_X and ST_Y aggregates (fast) if available. If the aggregate fails, fall back to sampling WKB.
+        # -------------------------
+        coords_look_projected = False
+        try:
+            # sample up to 1000 geometries for min/max X/Y (fast aggregate on a subquery)
+            extent_sql = f"""
+                SELECT
+                  MIN(ST_X(b.{geom_col})) AS xmin,
+                  MAX(ST_X(b.{geom_col})) AS xmax,
+                  MIN(ST_Y(b.{geom_col})) AS ymin,
+                  MAX(ST_Y(b.{geom_col})) AS ymax
+                FROM (SELECT {geom_col} FROM {tmp_buildings} LIMIT 1000) b
+            """
+            row = con.execute(extent_sql).fetchone()
+            xmin, xmax, ymin, ymax = row
+            # if any coordinate magnitude is large (>100000) assume projected meters
+            if xmin is not None and xmax is not None and ymin is not None and ymax is not None:
+                if (abs(xmin) > 1e5 or abs(xmax) > 1e5 or abs(ymin) > 1e5 or abs(ymax) > 1e5):
+                    coords_look_projected = True
+                else:
+                    coords_look_projected = False
+            else:
+                # fallback to WKB-sampling below if nulls
+                raise Exception("extent nulls - fallback sample")
+        except Exception:
+            # fallback: sample some WKBs and inspect numeric ranges in Python (safe but slightly slower)
+            try:
+                sample_sql = f"SELECT ST_AsWKB({geom_col}) AS wkb FROM {tmp_buildings} LIMIT 200"
+                df_sample = con.execute(sample_sql).df()
+                from shapely import wkb as _wkb
+                xs = []
+                ys = []
+                for w in df_sample['wkb'].dropna():
+                    try:
+                        geom = _wkb.loads(bytes(w)) if not isinstance(w, memoryview) else _wkb.loads(w.tobytes())
+                        # take bounds
+                        minx, miny, maxx, maxy = geom.bounds
+                        xs.extend([minx, maxx])
+                        ys.extend([miny, maxy])
+                    except Exception:
+                        continue
+                if xs and ys and (max(map(abs, xs)) > 1e5 or max(map(abs, ys)) > 1e5):
+                    coords_look_projected = True
+                else:
+                    coords_look_projected = False
+            except Exception:
+                # as a safe default, assume the declared SRID is correct (i.e. do transform)
+                coords_look_projected = False
+
+        # -------------------------
+        # Build transformed table (if needed). Important: we DO NOT call ST_SetSRID anywhere.
+        # Cases:
+        #  - declared SRID == OUTPUT_EPSG -> use tmp_buildings directly
+        #  - declared SRID == 4326 but coords look projected -> don't transform; use tmp_buildings
+        #  - declared SRID != OUTPUT_EPSG -> normal ST_Transform(tmp_geom, 'EPSG:{b_srid}', 'EPSG:{OUTPUT_EPSG}')
+        # -------------------------
         buildings_for_join = tmp_buildings
         transformed_table = None
-        if b_srid != OUTPUT_EPSG:
+
+        if b_srid == OUTPUT_EPSG:
+            # already in output CRS
+            buildings_for_join = tmp_buildings
+        elif b_srid == 4326 and coords_look_projected:
+            # declared 4326 but coords are meters -> treat as already in output CRS (no transform)
+            print("  ⚠️  Heuristic: coordinates look projected (meters). Will NOT reproject from declared SRID.")
+            buildings_for_join = tmp_buildings
+        else:
+            # create a transformed temp table (one-shot)
             transformed_table = f"{tmp_buildings}_xform"
             try:
                 con.execute(f"DROP TABLE IF EXISTS {transformed_table}")
@@ -192,15 +266,18 @@ def process_tile(con, tile_path: Path, us_srid: int, canada_srid: int):
                     FROM {tmp_buildings}
                 """)
                 buildings_for_join = transformed_table
+                print(f"  ✓ Created transformed table `{transformed_table}` (SRID {b_srid} -> EPSG:{OUTPUT_EPSG})")
             except Exception as e:
                 print(f"  ✗ Failed to create transformed buildings table: {e}")
+                traceback.print_exc()
+                # fall back to using original table (will likely cause join SRID mismatch)
                 buildings_for_join = tmp_buildings
 
-        # choose the geometry column name we will use in SQL (transformed table uses "geom")
+        # Which geometry column to use for joins (transformed uses "geom")
         join_geom = "geom" if buildings_for_join != tmp_buildings else geom_col
         print(f"  Using buildings table `{buildings_for_join}` with geometry column `{join_geom}`")
 
-        # Perform joins using pre-transformed census (assumed loaded into OUTPUT_EPSG)
+        # Now do the joins (US and Canada). census_* tables already transformed to OUTPUT_EPSG.
         if us_srid is not None:
             print(f"  Checking US census blocks...")
             sql_us = f"""
@@ -210,7 +287,6 @@ def process_tile(con, tile_path: Path, us_srid: int, canada_srid: int):
                 INNER JOIN census_us c
                   ON ST_Intersects(b.{join_geom}, c.geom)
             """
-
             try:
                 us_matches = con.execute(f"SELECT COUNT(*) FROM ({sql_us})").fetchone()[0]
                 if us_matches > 0:
@@ -221,6 +297,7 @@ def process_tile(con, tile_path: Path, us_srid: int, canada_srid: int):
                     print(f"    No US matches")
             except Exception as e:
                 print(f"    ✗ US join failed: {e}")
+                traceback.print_exc()
 
         if canada_srid is not None:
             print(f"  Checking Canada census blocks...")
@@ -241,6 +318,7 @@ def process_tile(con, tile_path: Path, us_srid: int, canada_srid: int):
                     print(f"    No Canada matches")
             except Exception as e:
                 print(f"    ✗ Canada join failed: {e}")
+                traceback.print_exc()
 
         # Cleanup temp tables
         try:
@@ -260,21 +338,20 @@ def process_tile(con, tile_path: Path, us_srid: int, canada_srid: int):
 
         # Combine results and convert WKB -> geometry safely (handle nulls)
         combined = pd.concat(results, ignore_index=True)
-        from shapely import wkb
+        from shapely import wkb as _wkb
         def _wkb_to_geom(val):
             try:
                 if val is None:
                     return None
                 if isinstance(val, memoryview):
                     val = val.tobytes()
-                return wkb.loads(bytes(val))
+                return _wkb.loads(bytes(val))
             except Exception:
                 return None
 
         combined['geometry'] = combined['geom_wkb'].apply(_wkb_to_geom)
         combined = combined.drop(columns=['geom_wkb'], errors='ignore')
         gdf = gpd.GeoDataFrame(combined, geometry='geometry', crs=OUTPUT_CRS)
-        # Optionally drop rows with missing geometry:
         gdf = gdf[~gdf.geometry.isna()]
 
         print(f"  ✓ Total filtered buildings: {len(gdf):,}")
@@ -462,15 +539,18 @@ def main():
             if result is None:
                 print(f"  → No matches - marking as processed and deleting file")
                 _mark_processed(tile_path.name)
-                processed_count += 1  # ADD THIS LINE
+                processed_count += 1
                 # Delete since no errors, just no matches
-                try:
-                    tile_path.unlink()
-                    print(f"  🗑️  Deleted {tile_path.name}")
-                except Exception as e:
-                    print(f"  ⚠️  Could not delete: {e}")
+                if DELETE_PROCESSED_FILES:
+                    try:
+                        tile_path.unlink()
+                        print(f"  🗑️  Deleted {tile_path.name}")
+                    except Exception as e:
+                        print(f"  ⚠️  Could not delete: {e}")
+                else:
+                    print(f"  📁 Keeping {tile_path.name} (DELETE_PROCESSED_FILES=False)")
 
-                print(f"\n📊 Progress: {processed_count} tiles processed, {error_count} errors")  # ADD THIS LINE
+                print(f"\n📊 Progress: {processed_count} tiles processed, {error_count} errors")
                 continue
 
             # Append to master GPKG
@@ -479,11 +559,14 @@ def main():
             processed_count += 1
 
             # DELETE THE ORIGINAL FILE (successful processing, no errors)
-            try:
-                tile_path.unlink()
-                print(f"  🗑️  Deleted {tile_path.name}")
-            except Exception as e:
-                print(f"  ⚠️  Could not delete {tile_path.name}: {e}")
+            if DELETE_PROCESSED_FILES:
+                try:
+                    tile_path.unlink()
+                    print(f"  🗑️  Deleted {tile_path.name}")
+                except Exception as e:
+                    print(f"  ⚠️  Could not delete {tile_path.name}: {e}")
+            else:
+                print(f"  📁 Keeping {tile_path.name} (DELETE_PROCESSED_FILES=False)")
 
             print(f"\n📊 Progress: {processed_count} tiles processed, {error_count} errors")
 
