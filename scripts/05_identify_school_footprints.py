@@ -19,7 +19,7 @@ COUNTRIES = {
     'canada': {
         'schools_path': '../inputs/schools/canada/canada_school_points.gpkg',
         'schools_layer': 'schools',
-        'buildings_path': '../outputs/buildings_near_schools.gpkg',
+        'buildings_path': '../outputs/buildings_near_schools_backup.gpkg',
         'buildings_layer': 'buildings',
         'output_path': '../outputs/canada_school_footprints.gpkg',
         'epsg': 3347,
@@ -29,7 +29,7 @@ COUNTRIES = {
     'united_states': {
         'schools_path': '../inputs/schools/united_states/US_school_points.gpkg',
         'schools_layer': 'schools',
-        'buildings_path': '../outputs/buildings_near_schools.gpkg',
+        'buildings_path': '../outputs/buildings_near_schools_backup.gpkg',
         'buildings_layer': 'buildings',
         'output_path': '../outputs/us_school_footprints.gpkg',
         'epsg': 5070,
@@ -562,6 +562,35 @@ def process_country(country_name, config, use_osm=True):
     except Exception as e:
         print(f"Warning: Could not calculate unmatched schools: {e}")
         unmatched_schools = None
+
+    # ========================================================================
+    # PRINT SAMPLE OF UNMATCHED SCHOOLS
+    # ========================================================================
+    if unmatched_schools is not None and len(unmatched_schools) > 0:
+        print("\n" + "=" * 60)
+        print("SAMPLE OF UNMATCHED SCHOOLS (First 10)")
+        print("=" * 60)
+
+        # Get first 10 unmatched schools
+        sample = unmatched_schools.head(10)
+
+        for idx, row in sample.iterrows():
+            print(f"\nSchool #{idx + 1}:")
+            # Print all non-geometry columns
+            for col in row.index:
+                if col != 'geometry':
+                    value = row[col]
+                    if pd.notna(value):
+                        print(f"  {col}: {value}")
+
+            # Print coordinates
+            geom = row['geometry']
+            if geom is not None:
+                print(f"  Coordinates: ({geom.x:.6f}, {geom.y:.6f})")
+
+        print("\n" + "=" * 60)
+        print(f"Total unmatched: {len(unmatched_schools):,}")
+        print("=" * 60)
 
     # ========================================================================
     # PART 5: Retry with 3-meter buffer for unmatched schools
